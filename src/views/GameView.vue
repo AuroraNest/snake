@@ -64,7 +64,7 @@ function exportCSV() {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'snake_scores.csv'; a.click(); URL.revokeObjectURL(a.href)
 }
 function exportTXT() {
-  const lines = [ `最高分: ${highScore.value}`, ...recentScores.value.map((v,i)=>`最近 ${i+1}: ${v}`) ]
+  const lines = [ `最高分: ${highScore.value}`, ...recentScores.value.map((v,i)=>`最近${i+1}: ${v}`) ]
   const blob = new Blob([ lines.join('\n') ], { type: 'text/plain;charset=utf-8;' })
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'snake_scores.txt'; a.click(); URL.revokeObjectURL(a.href)
 }
@@ -97,21 +97,6 @@ function resetGame2() {
   prevSnake = snake.value.map(p => ({ x: p.x, y: p.y }))
   for (const b of bots.value) { b.prevBody = b.body.map(p => ({ x: p.x, y: p.y })) }
 }
-
-/* function resetGame() {
-  const cx = Math.floor(COLS/2), cy = Math.floor(ROWS/2)
-  snake.value = [ {x:cx,y:cy}, {x:cx-1,y:cy}, {x:cx-2,y:cy} ]
-  dir.value = { x:1, y:0 }; nextDir = { x:1, y:0 }
-  score.value = 0; gameOver.value = false; paused.value = false
-  foods.value = []; penalties.value = []
-  // 初始化两个机器人蛇
-  bots.value = []
-  const mkBot = (x:number,y:number,dx:number,dy:number,color:string): Actor => ({ body:[{x,y},{x-dx,y-dy},{x-2*dx,y-2*dy}], dir:{x:dx,y:dy}, nextDir:{x:dx,y:dy}, alive:true, color, prevBody:[], isPlayer:false })
-  bots.value.push(mkBot(2,2,1,0,'#f59e0b'))
-  bots.value.push(mkBot(COLS-3,ROWS-3,-1,0,'#8b5cf6'))
-  placeFoods(true); prevSnake = snake.value.map(p=>({...p}))
-  for(const b of bots.value) b.prevBody = b.body.map(p=>({...p}))
-} */
 
 function startGame() { resetGame2(); started.value = true; startLoop() }
 function stopGame() { if (rafId) cancelAnimationFrame(rafId); rafId = null }
@@ -188,7 +173,7 @@ function chooseBotDir(bot: Actor){
     const wallDist = Math.min(nx, ny, COLS-1-nx, ROWS-1-ny)
     let foodDist = Infinity
     for (const f of foods.value){ const dm=Math.abs(f.x-nx)+Math.abs(f.y-ny); if (dm<foodDist) foodDist=dm }
-    const score = safeNext*100 + wallDist*10 - foodDist // 以生存为主，取食为次
+    const greedy = Math.random() < 0.25; const score = safeNext*6 + wallDist*1 - foodDist*(greedy? 2.2 : 1.1) + (foods.value.some(f=>f.x===nx&&f.y===ny)?3:0)
     if (score > bestScore){ bestScore = score; bestDir = d }
   }
   bot.nextDir = bestDir ?? bot.dir
@@ -295,112 +280,6 @@ function doTickMulti2(){
   }
 }
 
-// 多蛇版本推进一帧
-function doTickMulti(){
-  // 更新方向（玩家 + 机器人）
-// function old_doTick(){
-/*  if (!isOpposite(nextDir, dir.value)) dir.value = nextDir
-  for (const b of bots.value){ if (b.alive){ chooseBotDir(b); if (!isOpposite(b.nextDir, b.dir)) b.dir = b.nextDir } }
-
-  const actors = [
-    { kind:'player' as const, body: snake.value, dir: dir.value },
-    ...bots.value.filter(b=>b.alive).map(b=>({ kind:'bot' as const, bot:b, body:b.body, dir:b.dir }))
-  ]
-
-  // 所有当前占用位置
-  const allOcc = new Set<string>([
-    ...snake.value.map(p=>`${p.x},${p.y}`),
-    ...bots.value.flatMap(b=>b.body.map(p=>`${p.x},${p.y}`)),
-  ])
-
-  type Plan = { idx:number; kind:'player'|'bot'; bot?:Actor; newHead:Point; willEat:boolean; fIdx:number; willPenalty:boolean; pIdx:number; alive:boolean }
-  const plans: Plan[] = []
-
-  // 阶段1：计算意图并进行身体/墙碰撞检测（考虑尾巴移动）
-  actors.forEach((a,idx)=>{
-    const head = a.body[0]
-    const nh = { x: head.x + a.dir.x, y: head.y + a.dir.y }
-    let alive = true
-    if (nh.x<0||nh.x>=COLS||nh.y<0||nh.y>=ROWS) alive = false
-    const fIdx = foods.value.findIndex(f=>cellEq(f,nh))
-    const willEat = fIdx!==-1
-    const pIdx = fIdx===-1 ? penalties.value.findIndex(p=>p.x===nh.x&&p.y===nh.y) : -1
-    const willPenalty = pIdx!==-1
-
-    // 身体碰撞：把所有当前占用加入集合，并移除本蛇尾巴（若不增长）
-    const occ = new Set(allOcc)
-    if (!willEat){ const tail = a.body[a.body.length-1]; occ.delete(`${tail.x},${tail.y}`) }
-    if (alive && occ.has(`${nh.x},${nh.y}`)) alive = false
-    plans.push({ idx, kind: a.kind, bot: (a as any).bot, newHead: nh, willEat, fIdx, willPenalty, pIdx, alive })
-  })
-
-  // 头对头碰撞：同一网格的多头全部死亡
-  const headCount = new Map<string, number>()
-  for (const p of plans.filter(p=>p.alive)){
-    const k = `${p.newHead.x},${p.newHead.y}`
-    headCount.set(k, (headCount.get(k)||0)+1)
-  }
-  for (const p of plans){ if (p.alive){ const k=`${p.newHead.x},${p.newHead.y}`; if ((headCount.get(k)||0) > 1) p.alive=false } }
-
-  // 阶段2：提交移动与效果
-  prevSnake = snake.value.map(p=>({...p}))
-  bots.value.forEach(b=>{ b.prevBody = b.body.map(p=>({...p})) })
-
-  for (const p of plans){
-    const isPlayer = p.kind==='player'
-    const body = isPlayer ? snake.value : (p.bot!.body)
-    if (!p.alive){
-      if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue }
-    }
-    // 先移动
-    body.unshift(p.newHead)
-    if (p.willEat){
-      if (isPlayer) score.value += 1
-      foods.value.splice(p.fIdx,1); placeFoods(false)
-    } else {
-      body.pop()
-    }
-    // 扣分点
-    if (p.willPenalty){
-      penalties.value.splice(p.pIdx,1)
-      if (isPlayer) score.value = Math.max(0, score.value - 1)
-      const newLen = Math.floor(body.length * 0.5)
-      if (newLen < 1){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue } }
-      body.splice(newLen)
-    }
-  }
-} */
-  if (!isOpposite(nextDir, dir.value)) dir.value = nextDir
-  const head = snake.value[0]
-  const newHead = { x: head.x + dir.value.x, y: head.y + dir.value.y }
-  if (newHead.x<0||newHead.x>=COLS||newHead.y<0||newHead.y>=ROWS){ onGameOver(); return }
-
-  const fIdx = foods.value.findIndex(f=>cellEq(f,newHead))
-  const pIdx = fIdx===-1 ? penalties.value.findIndex(p=>p.x===newHead.x&&p.y===newHead.y) : -1
-  const willEat = fIdx!==-1
-  const willPenalty = pIdx!==-1
-  const checkBody = snake.value.slice(0, snake.value.length - (willEat ? 0 : 1))
-  if (checkBody.some(p=>cellEq(p,newHead))){ onGameOver(); return }
-
-  prevSnake = snake.value.map(p=>({...p}))
-  snake.value.unshift(newHead)
-  if (willEat) {
-    score.value += 1
-    foods.value.splice(fIdx,1)
-    placeFoods(false)
-  } else {
-    snake.value.pop()
-  }
-  if (willPenalty){
-    // 命中扣分点：分数 -1，长度缩减 50%
-    penalties.value.splice(pIdx,1)
-    score.value = Math.max(0, score.value - 1)
-    const newLen = Math.floor(snake.value.length * 0.5)
-    if (newLen < 1) { onGameOver(); return }
-    snake.value.splice(newLen)
-  }
-}
-
 function onGameOver(){ gameOver.value = true; stopGame(); pushScore(score.value) }
 
 // 绘制
@@ -434,11 +313,11 @@ function queueDir(x:number,y:number){ const nd={x,y}; if(!isOpposite(nd,dir.valu
         <button class="btn" @click="paused = !paused" :disabled="!started || gameOver">{{ paused ? '继续' : '暂停' }}</button>
       </div>
       <div class="difficulty">
-        <label for="diff">难度：</label>
+        <label for="diff">难度</label>
         <select id="diff" v-model="difficulty">
-          <option value="slow">慢速</option>
+          <option value="slow">慢</option>
           <option value="normal">正常</option>
-          <option value="fast">快速</option>
+          <option value="fast">快</option>
         </select>
       </div>
       <div class="recent">
@@ -454,22 +333,22 @@ function queueDir(x:number,y:number){ const nd={x,y}; if(!isOpposite(nd,dir.valu
       </div>
       <div class="dpad" aria-label="方向控制">
         <div class="row">
-          <button class="arrow" @click="queueDir(0,-1)" title="上">↑</button>
+          <button class="arrow" @click="queueDir(0,-1)" title="上">▲</button>
         </div>
         <div class="row">
-          <button class="arrow" @click="queueDir(-1,0)" title="左">←</button>
-          <button class="arrow" @click="queueDir(1,0)" title="右">→</button>
+          <button class="arrow" @click="queueDir(-1,0)" title="左">◀</button>
+          <button class="arrow" @click="queueDir(1,0)" title="右">▶</button>
         </div>
         <div class="row">
-          <button class="arrow" @click="queueDir(0,1)" title="下">↓</button>
+          <button class="arrow" @click="queueDir(0,1)" title="下">▼</button>
         </div>
       </div>
       <div class="help">
         <div>玩法变化</div>
         <ul>
           <li>同时可能有多个得分点</li>
-          <li>新增敌对蛇：和它或墙相撞即死</li>
-          <li>会随机出现“扣分点”（短时间内消失）</li>
+          <li>新增敌对蛇：与其或墙相撞即死</li>
+          <li>会随机出现"扣分点"（短时间内消失）</li>
           <li>吃到扣分点：分数 -1，长度 -50%</li>
         </ul>
       </div>
