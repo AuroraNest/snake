@@ -139,7 +139,7 @@ function startLoop(){
   const frame = (ts:number)=>{
     const dt = ts - lastFrame; lastFrame = ts
     if (started.value && !paused.value && !gameOver.value) {
-      if (ts - lastTick >= getTickMs()) { doTickMulti(); lastTick = ts }
+      if (ts - lastTick >= getTickMs()) { doTickMulti2(); lastTick = ts }
       updatePenalties(); maybeSpawnPenalty()
     }
     draw(Math.max(0, Math.min(1, (ts - lastTick) / getTickMs())))
@@ -158,6 +158,33 @@ function randEmpty(): Point {
   let x=0,y=0,c=0; do{ x=Math.floor(Math.random()*COLS); y=Math.floor(Math.random()*ROWS); c++ }while(occ.has(`${x},${y}`)&&c<2000)
   return {x,y}
 }
+
+// 机器人简单寻路：尽量靠近最近食物，并避免撞墙/身体
+function chooseBotDir(bot: Actor){
+  if (!bot.alive) return
+  const head = bot.body[0]
+  const dirs: Point[] = [ {x:1,y:0}, {x:-1,y:0}, {x:0, y:1}, {x:0, y:-1} ]
+  // 选择最近食物作为参考方向
+  let target: Point | null = null
+  let best = Infinity
+  for (const f of foods.value){ const d=Math.abs(f.x-head.x)+Math.abs(f.y-head.y); if (d<best){ best=d; target=f } }
+  const ordered = target ? [...dirs].sort((a,b)=>{
+    const da=Math.abs((head.x+a.x)-target!.x)+Math.abs((head.y+a.y)-target!.y)
+    const db=Math.abs((head.x+b.x)-target!.x)+Math.abs((head.y+b.y)-target!.y)
+    return da-db
+  }) : dirs
+  const allOcc = new Set<string>([ ...snake.value.map(p=>`${p.x},${p.y}`), ...bots.value.flatMap(b=>b.body.map(p=>`${p.x},${p.y}`)) ])
+  for (const d of ordered){
+    if (d.x + bot.dir.x === 0 && d.y + bot.dir.y === 0) continue
+    const nx=head.x+d.x, ny=head.y+d.y
+    if (nx<0||nx>=COLS||ny<0||ny>=ROWS) continue
+    const tail=bot.body[bot.body.length-1]
+    const key=`${nx},${ny}`
+    // 允许走进自己尾巴（若不增长会移动掉）
+    if (!allOcc.has(key) || (tail.x===nx && tail.y===ny)) { bot.nextDir=d; return }
+  }
+  bot.nextDir = bot.dir
+}
 function placeFoods(init=false){
   const min=1,max=3; if(init) foods.value=[]
   while(foods.value.length<min) foods.value.push(randEmpty())
@@ -165,6 +192,64 @@ function placeFoods(init=false){
 }
 function maybeSpawnPenalty(){ if(penalties.value.length>=1) return; if(Math.random()<0.12){ const p=randEmpty(); penalties.value.push({x:p.x,y:p.y,expiresAt:performance.now()+ (3000+Math.random()*3000)}) } }
 function updatePenalties(){ const now=performance.now(); penalties.value = penalties.value.filter(p=>p.expiresAt>now) }
+
+// 干净的多蛇推进函数（不依赖旧残留代码）
+function doTickMulti2(){
+  if (!isOpposite(nextDir, dir.value)) dir.value = nextDir
+  for (const b of bots.value){ if (b.alive){ chooseBotDir(b); if (!isOpposite(b.nextDir, b.dir)) b.dir = b.nextDir } }
+
+  const actors = [
+    { kind:'player' as const, body: snake.value, dir: dir.value },
+    ...bots.value.filter(b=>b.alive).map(b=>({ kind:'bot' as const, bot:b, body:b.body, dir:b.dir }))
+  ]
+
+  const allOcc = new Set<string>([
+    ...snake.value.map(p=>`${p.x},${p.y}`),
+    ...bots.value.flatMap(b=>b.body.map(p=>`${p.x},${p.y}`)),
+  ])
+
+  type Plan = { kind:'player'|'bot'; bot?:Actor; newHead:Point; willEat:boolean; fIdx:number; willPenalty:boolean; pIdx:number; alive:boolean }
+  const plans: Plan[] = []
+
+  for (const a of actors){
+    const head = a.body[0]
+    const nh = { x: head.x + a.dir.x, y: head.y + a.dir.y }
+    let alive = !(nh.x<0||nh.x>=COLS||nh.y<0||nh.y>=ROWS)
+    const fIdx = foods.value.findIndex(f=>cellEq(f,nh))
+    const willEat = fIdx!==-1
+    const pIdx = willEat ? -1 : penalties.value.findIndex(p=>p.x===nh.x&&p.y===nh.y)
+    const willPenalty = pIdx!==-1
+    const occ = new Set(allOcc)
+    if (!willEat){ const tail=a.body[a.body.length-1]; occ.delete(`${tail.x},${tail.y}`) }
+    if (alive && occ.has(`${nh.x},${nh.y}`)) alive=false
+    plans.push({ kind:(a as any).kind, bot:(a as any).bot, newHead:nh, willEat, fIdx, willPenalty, pIdx, alive })
+  }
+
+  const headCount = new Map<string, number>()
+  for (const p of plans.filter(p=>p.alive)){
+    const k = `${p.newHead.x},${p.newHead.y}`
+    headCount.set(k, (headCount.get(k)||0)+1)
+  }
+  for (const p of plans){ if (p.alive){ const k=`${p.newHead.x},${p.newHead.y}`; if ((headCount.get(k)||0) > 1) p.alive=false } }
+
+  prevSnake = snake.value.map(p=>({...p}))
+  for (const b of bots.value){ b.prevBody = b.body.map(p=>({...p})) }
+
+  for (const p of plans){
+    const isPlayer = p.kind==='player'
+    const body = isPlayer ? snake.value : p.bot!.body
+    if (!p.alive){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue } }
+    body.unshift(p.newHead)
+    if (p.willEat){ if (isPlayer) score.value += 1; foods.value.splice(p.fIdx,1); placeFoods(false) } else { body.pop() }
+    if (p.willPenalty){
+      penalties.value.splice(p.pIdx,1)
+      if (isPlayer) score.value = Math.max(0, score.value - 1)
+      const newLen = Math.floor(body.length * 0.5)
+      if (newLen < 1){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue } }
+      body.splice(newLen)
+    }
+  }
+}
 
 // 多蛇版本推进一帧
 function doTickMulti(){
