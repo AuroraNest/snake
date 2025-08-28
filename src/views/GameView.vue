@@ -14,6 +14,7 @@ const H = ROWS * CELL
 type Difficulty = 'slow' | 'normal' | 'fast'
 const SPEEDS: Record<Difficulty, number> = { slow: 180, normal: 120, fast: 80 }
 const difficulty = ref<Difficulty>('normal')
+const BOTS_TARGET = 2
 
 // 画布
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -164,26 +165,64 @@ function chooseBotDir(bot: Actor){
   if (!bot.alive) return
   const head = bot.body[0]
   const dirs: Point[] = [ {x:1,y:0}, {x:-1,y:0}, {x:0, y:1}, {x:0, y:-1} ]
-  // 选择最近食物作为参考方向
-  let target: Point | null = null
-  let best = Infinity
-  for (const f of foods.value){ const d=Math.abs(f.x-head.x)+Math.abs(f.y-head.y); if (d<best){ best=d; target=f } }
-  const ordered = target ? [...dirs].sort((a,b)=>{
-    const da=Math.abs((head.x+a.x)-target!.x)+Math.abs((head.y+a.y)-target!.y)
-    const db=Math.abs((head.x+b.x)-target!.x)+Math.abs((head.y+b.y)-target!.y)
-    return da-db
-  }) : dirs
   const allOcc = new Set<string>([ ...snake.value.map(p=>`${p.x},${p.y}`), ...bots.value.flatMap(b=>b.body.map(p=>`${p.x},${p.y}`)) ])
-  for (const d of ordered){
-    if (d.x + bot.dir.x === 0 && d.y + bot.dir.y === 0) continue
+
+  let bestDir: Point | null = null
+  let bestScore = -Infinity
+  for (const d of dirs){
+    if (d.x + bot.dir.x === 0 && d.y + bot.dir.y === 0) continue // 不要反向
     const nx=head.x+d.x, ny=head.y+d.y
     if (nx<0||nx>=COLS||ny<0||ny>=ROWS) continue
     const tail=bot.body[bot.body.length-1]
-    const key=`${nx},${ny}`
-    // 允许走进自己尾巴（若不增长会移动掉）
-    if (!allOcc.has(key) || (tail.x===nx && tail.y===ny)) { bot.nextDir=d; return }
+    const occ = allOcc.has(`${nx},${ny}`) && !(tail.x===nx && tail.y===ny)
+    if (occ) continue
+    // 评估安全度：下一格可走的合法方向数量越多越好
+    let safeNext = 0
+    for (const d2 of dirs){
+      if (d2.x + d.x === 0 && d2.y + d.y === 0) continue
+      const nx2 = nx + d2.x, ny2 = ny + d2.y
+      if (nx2<0||nx2>=COLS||ny2<0||ny2>=ROWS) continue
+      const occ2 = allOcc.has(`${nx2},${ny2}`) && !(tail.x===nx2 && tail.y===ny2)
+      if (!occ2) safeNext++
+    }
+    const wallDist = Math.min(nx, ny, COLS-1-nx, ROWS-1-ny)
+    let foodDist = Infinity
+    for (const f of foods.value){ const dm=Math.abs(f.x-nx)+Math.abs(f.y-ny); if (dm<foodDist) foodDist=dm }
+    const score = safeNext*100 + wallDist*10 - foodDist // 以生存为主，取食为次
+    if (score > bestScore){ bestScore = score; bestDir = d }
   }
-  bot.nextDir = bot.dir
+  bot.nextDir = bestDir ?? bot.dir
+}
+
+// 生成一个新的机器人蛇（长度3），尽量选择安全出生点和方向
+function spawnBot(): Actor {
+  const palette = ['#f59e0b','#8b5cf6','#10b981','#ef4444','#eab308','#06b6d4']
+  const color = palette[Math.floor(Math.random()*palette.length)]
+  const occAlive = new Set<string>([
+    ...snake.value.map(p=>`${p.x},${p.y}`),
+    ...bots.value.filter(b=>b.alive).flatMap(b=>b.body.map(p=>`${p.x},${p.y}`)),
+    ...foods.value.map(p=>`${p.x},${p.y}`),
+    ...penalties.value.map(p=>`${p.x},${p.y}`),
+  ])
+  let head = {x:0,y:0}
+  let dir: Point = {x:1,y:0}
+  let placed = false
+  const dirs: Point[] = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}]
+  for (let tries=0; tries<800 && !placed; tries++){
+    const p = randEmpty()
+    for (const d of dirs){
+      const p1 = {x:p.x-d.x, y:p.y-d.y}
+      const p2 = {x:p.x-2*d.x, y:p.y-2*d.y}
+      const inBounds = (q:Point)=>q.x>=0&&q.x<COLS&&q.y>=0&&q.y<ROWS
+      const key=(q:Point)=>`${q.x},${q.y}`
+      if (inBounds(p) && inBounds(p1) && inBounds(p2)
+          && !occAlive.has(key(p)) && !occAlive.has(key(p1)) && !occAlive.has(key(p2))){
+        head = p; dir = d; placed = true; break
+      }
+    }
+  }
+  const body = [ head, {x:head.x-dir.x,y:head.y-dir.y}, {x:head.x-2*dir.x,y:head.y-2*dir.y} ]
+  return { body, dir, nextDir: dir, alive:true, color, prevBody: body.map(p=>({...p})) }
 }
 function placeFoods(init=false){
   const min=1,max=3; if(init) foods.value=[]
@@ -238,7 +277,7 @@ function doTickMulti2(){
   for (const p of plans){
     const isPlayer = p.kind==='player'
     const body = isPlayer ? snake.value : p.bot!.body
-    if (!p.alive){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue } }
+    if (!p.alive){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; p.bot!.body = []; continue } }
     body.unshift(p.newHead)
     if (p.willEat){ if (isPlayer) score.value += 1; foods.value.splice(p.fIdx,1); placeFoods(false) } else { body.pop() }
     if (p.willPenalty){
@@ -248,6 +287,11 @@ function doTickMulti2(){
       if (newLen < 1){ if (isPlayer){ onGameOver(); return } else { p.bot!.alive=false; continue } }
       body.splice(newLen)
     }
+  }
+  // 维持目标数量：死亡后立刻补充新的机器人
+  while (bots.value.filter(b=>b.alive).length < BOTS_TARGET){
+    const nb = spawnBot();
+    bots.value.push(nb)
   }
 }
 
