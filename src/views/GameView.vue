@@ -151,9 +151,12 @@ function doTick(){
     snake.value.pop()
   }
   if (willPenalty){
+    // 命中扣分点：分数 -1，长度缩减 50%
     penalties.value.splice(pIdx,1)
     score.value = Math.max(0, score.value - 1)
-    if (snake.value.length>1) snake.value.splice(Math.max(1, snake.value.length-2))
+    const newLen = Math.floor(snake.value.length * 0.5)
+    if (newLen < 1) { onGameOver(); return }
+    snake.value.splice(newLen)
   }
 }
 
@@ -225,7 +228,7 @@ function queueDir(x:number,y:number){ const nd={x,y}; if(!isOpposite(nd,dir.valu
         <ul>
           <li>同时可能有多个得分点</li>
           <li>会随机出现“扣分点”（短时间内消失）</li>
-          <li>吃到扣分点：分数 -1，长度 -2</li>
+          <li>吃到扣分点：分数 -1，长度 -50%</li>
         </ul>
       </div>
     </div>
